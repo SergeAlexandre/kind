@@ -1,176 +1,174 @@
-<p align="center"><img alt="kind" src="./logo/logo.png" width="300px" /></p>
+# DockerIP Kind patch
 
-# Please see [Our Documentation](https://kind.sigs.k8s.io/docs/user/quick-start/) for more in-depth installation etc.
+Aim of this patch is to allow building a Kind cluster with a fixed IP address for each container.
 
-kind is a tool for running local Kubernetes clusters using Docker container "nodes".
-kind was primarily designed for testing Kubernetes itself, but may be used for local development or CI.
+The main motivation is to be resilient against Docker restart and reboot of the workstation. 
 
-If you have [go] 1.16+ and [docker] or [podman] installed `go install sigs.k8s.io/kind@v0.21.0 && kind create cluster` is all you need!
+The original `kind` README is [here](./README.md)
 
-![](site/static/images/kind-create-cluster.png)
+## What was the problem
 
-kind consists of:
-- Go [packages][packages] implementing [cluster creation][cluster package], [image build][build package], etc.
-- A command line interface ([`kind`][kind cli]) built on these packages.
-- Docker [image(s)][images] written to run systemd, Kubernetes, etc.
-- [`kubetest`][kubetest] integration also built on these packages (WIP)
+The problem occurs only for clusters with several nodes on the control plane. 
 
-kind bootstraps each "node" with [kubeadm][kubeadm]. For more details see [the design documentation][design doc].
+Kind rely on Docker to allocate IP addresses when launching a cluster. Such allocation is performed randomly, 
+based on the container creation order, witch is also random.
 
-**NOTE**: kind is still a work in progress, see the [1.0 roadmap].
+When Docker is stopped (For any reason, including workstation crash) and restarted, the containers can restart without 
+any data lost, in most cases. But, IP address are reallocated in containers start ordering, which is different from the 
+initial one. So, the kubernetes configuration is invalid.
 
-## Installation and usage
+So this solution to allow container's IP addresses to be explicitly defined.
 
-For a complete [install guide] see [the documentation here][install guide].
+## Limitation
 
-You can install kind with `go install sigs.k8s.io/kind@v0.21.0`.
+- Works only with the Docker provider.
+- Require manual IP addresses management
 
-**NOTE**: please use the latest go to do this. KIND is developed with the latest stable go, see [`.go-version`](./.go-version) for the exact version we're using.
+## Usage
 
-This will put `kind` in `$(go env GOPATH)/bin`. If you encounter the error
-`kind: command not found` after installation then you may need to either add that directory to your `$PATH` as
-shown [here](https://golang.org/doc/code.html#GOPATH) or do a manual installation by cloning the repo and run
-`make build` from the repository.
+Of course, first step is to include the patched Kind version in your path. This is transparent, as it behave like 
+the standard one by default.
 
-Without installing go, kind can be built reproducibly with docker using `make build`.
+Just download the version for your architecture on the [Releases section of this repo](https://github.com/SergeAlexandre/kind/releases). 
+And add it in your PATH before the original `kind` command. (Or replace it)
 
-Stable binaries are also available on the [releases] page. Stable releases are
-generally recommended for CI usage in particular.
-To install, download the binary for your platform from "Assets" and place this
-into your `$PATH`:
+To ensure which one is used, the postfix `-fipXX` has been added to the base version:
 
-On Linux:
-
-```console
-# For AMD64 / x86_64
-[ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.21.0/kind-$(uname)-amd64
-# For ARM64
-[ $(uname -m) = aarch64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.21.0/kind-$(uname)-arm64
-chmod +x ./kind
-sudo mv ./kind /usr/local/bin/kind
+```
+kind --version
+kind version 0.22.0-fip01
 ```
 
-On macOS via Homebrew:
+### Network setting
 
-```console
-brew install kind
+We will assume here you have a fresh docker installation, without any existing container.
+
+On its first usage, Kind create a docker network named 'kind'. Unfortunately, this default network is created such a 
+way (using ipv6) than assigning explicit IP address is refused. 
+So, the first step is to recreate it with just an ipv4 subnet. 
+
+```
+docker network rm kind # If kind was already used.
+docker network create -d=bridge -o com.docker.network.bridge.enable_ip_masquerade=true -o com.docker.network.driver.mtu=65535  --subnet 172.19.0.0/16 kind
 ```
 
-On macOS via MacPorts:
+> The network name `kind` is hard coded and can't be changed.
 
-```console
-sudo port selfupdate && sudo port install kind
+You can choose whatever subnet you want, provided it is RFC1918 compliant (RFC1918 define addressing for private subnet). 
+
+### Using raw IP
+
+In this patched Kind version, a `dockerIP` property has been added to each node, thus allowing to fix its address. 
+(Of course, such address must be included in the subnet defined previously)
+
+Also a `loadBalancer` entry has been added, to allow the same mechanism for this non-kubernetes container.
+
+For example:
+
+```
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ha1
+loadBalancer:
+  dockerIP: 172.19.101.6
+nodes:
+  - role: control-plane
+    dockerIP: 172.19.101.1
+  - role: control-plane
+    dockerIP: 172.19.101.2
+  - role: control-plane
+    dockerIP: 172.19.101.3
+  - role: worker
+    dockerIP: 172.19.101.4
+  - role: worker
+    dockerIP: 172.19.101.5
 ```
 
-On macOS via Bash:
+If you launch another Kind cluster without `dockerIP` properties, it will be managed the standard way. 
+This means IP will be allocated from the beginning of the subnet (First will be 172.19.0.2). Same if you create a non-Kind 
+docker container. This is why we began our clusters in the range 172.19.100.0
 
-```console
-# For Intel Macs
-[ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.21.0/kind-darwin-amd64
-# For M1 / ARM Macs
-[ $(uname -m) = arm64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.21.0/kind-darwin-arm64
-chmod +x ./kind
-mv ./kind /some-dir-in-your-PATH/kind
+> Note this is experimental observation and may not be always the case. 
+
+### Using DNS name
+
+Instead of providing raw IP addresses, one can provide DNS name:
+
+```
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ha2
+loadBalancer:
+  dockerIP: ha2-external-load-balancer
+nodes:
+  - role: control-plane
+    dockerIP: ha2-control-plane
+  - role: control-plane
+    dockerIP: ha2-control-plane2
+  - role: control-plane
+    dockerIP: ha2-control-plane3
+  - role: worker
+    dockerIP: ha2-worker
+  - role: worker
+    dockerIP: ha2-worker2
 ```
 
-On Windows:
+Such DNS name must resolve to IP addresses in the subnet range. For example, Here is an extract of the corresponding 
+`/etc/hosts` file:
 
-```powershell
-curl.exe -Lo kind-windows-amd64.exe https://kind.sigs.k8s.io/dl/v0.21.0/kind-windows-amd64
-Move-Item .\kind-windows-amd64.exe c:\some-dir-in-your-PATH\kind.exe
-
-# OR via Chocolatey (https://chocolatey.org/packages/kind)
-choco install kind
+```
+172.19.102.1 ha2-external-load-balancer
+172.19.102.2 ha2-control-plane
+172.19.102.3 ha2-control-plane2
+172.19.102.4 ha2-control-plane3
+172.19.102.5 ha2-worker
+172.19.102.6 ha2-worker2
 ```
 
-To use kind, you will need to [install docker].
-Once you have docker running you can create a cluster with:
+We choose to use the container name as the DNS name. But, this is not strictly mandatory in this case. 
 
-```console
-kind create cluster
+### Using `fromDNS` mode
+
+If you look at the previous example, it is obvious there is some redundancy. And you have to manually maintain matching 
+between the cluster configuration and the DNS.
+
+To aase management, a new mode has been implemented where each node will find its fixed IP address by resolving its container name.
+
+The mode is activated by adding `dockerIP.fromDNS: true` in the cluster definition. For example:
+
+```
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ha3
+dockerIP:
+  fromDNS: true
+nodes:
+  - role: control-plane
+  - role: control-plane
+  - role: control-plane
+  - role: worker
+  - role: worker
 ```
 
-To delete your cluster use:
+For this to works, the following must be defined in your `/etc/hosts`, or any other DNS subsystem effective on your workstation:
 
-```console
-kind delete cluster
+```
+172.19.103.1 ha3-external-load-balancer
+172.19.103.2 ha3-control-plane
+172.19.103.3 ha3-control-plane2
+172.19.103.4 ha3-control-plane3
+172.19.103.5 ha3-worker
+172.19.103.6 ha3-worker2
 ```
 
-<!--TODO(bentheelder): improve this part of the guide-->
-To create a cluster from Kubernetes source:
-- ensure that Kubernetes is cloned in `$(go env GOPATH)/src/k8s.io/kubernetes`
-- build a node image and create a cluster with:
-```console
-kind build node-image
-kind create cluster --image kindest/node:latest
-```
+Note than, is such case, you are not free to choose any name. These name are defined by Kind.
 
-Multi-node clusters and other advanced features may be configured with a config
-file, for more usage see [the docs][user guide] or run `kind [command] --help`
+Fortunately, they are easily guessable. And error message are explicit for error/retry on cluster creation.
 
-## Community
+### Node access from the workstation
 
-Please reach out for bugs, feature requests, and other issues!
-The maintainers of this project are reachable via:
+As the node name are now resolved by our DNS, it can be tempting to connect directly to each node from our workstation. 
+But, for Mac users, this is not so simple, as the `kind` network is not exposed on the macOS host.
 
-- [Kubernetes Slack] in the [#kind] channel
-- [filing an issue] against this repo
-- The Kubernetes [SIG-Testing Mailing List]
+To overcome this problem, a tool like [docker-mac-net-connect](https://github.com/chipmk/docker-mac-net-connect) can be installed.
 
-Current maintainers are [@aojea] and [@BenTheElder] - feel free to
-reach out if you have any questions!
-
-Pull Requests are very welcome!
-If you're planning a new feature, please file an issue to discuss first.
-
-Check the [issue tracker] for `help wanted` issues if you're unsure where to
-start, or feel free to reach out to discuss. 🙂
-
-See also: our own [contributor guide] and the Kubernetes [community page].
-
-## Why kind?
-
-- kind supports multi-node (including HA) clusters
-- kind supports building Kubernetes release builds from source
-  - support for make / bash or docker, in addition to pre-published builds
-- kind supports Linux, macOS and Windows
-- kind is a [CNCF certified conformant Kubernetes installer](https://landscape.cncf.io/?selected=kind)
-
-### Code of conduct
-
-Participation in the Kubernetes community is governed by the [Kubernetes Code of Conduct].
-
-<!--links-->
-[go]: https://golang.org/
-[go-supported]: https://golang.org/doc/devel/release.html#policy
-[docker]: https://www.docker.com/
-[podman]: https://podman.io/
-[community page]: https://kubernetes.io/community/
-[Kubernetes Code of Conduct]: code-of-conduct.md
-[Go Report Card Badge]: https://goreportcard.com/badge/sigs.k8s.io/kind
-[Go Report Card]: https://goreportcard.com/report/sigs.k8s.io/kind
-[conformance tests]: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/conformance-tests.md
-[packages]: ./pkg
-[cluster package]: ./pkg/cluster
-[build package]: ./pkg/build
-[kind cli]: ./main.go
-[images]: ./images
-[kubetest]: https://github.com/kubernetes/test-infra/tree/master/kubetest
-[kubeadm]: https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm/
-[design doc]: https://kind.sigs.k8s.io/docs/design/initial
-[user guide]: https://kind.sigs.k8s.io/docs/user/quick-start
-[SIG-Testing Mailing List]: https://groups.google.com/forum/#!forum/kubernetes-sig-testing
-[issue tracker]: https://github.com/kubernetes-sigs/kind/issues
-[filing an issue]: https://github.com/kubernetes-sigs/kind/issues/new
-[Kubernetes Slack]: http://slack.k8s.io/
-[#kind]: https://kubernetes.slack.com/messages/CEKK1KTN2/
-[1.0 roadmap]: https://kind.sigs.k8s.io/docs/contributing/1.0-roadmap
-[install docker]: https://docs.docker.com/install/
-[@BenTheElder]: https://github.com/BenTheElder
-[@munnerz]: https://github.com/munnerz
-[@aojea]: https://github.com/aojea
-[@amwat]: https://github.com/amwat
-[contributor guide]: https://kind.sigs.k8s.io/docs/contributing/getting-started
-[releases]: https://github.com/kubernetes-sigs/kind/releases
-[install guide]: https://kind.sigs.k8s.io/docs/user/quick-start/#installation
-[modules]: https://github.com/golang/go/wiki/Modules

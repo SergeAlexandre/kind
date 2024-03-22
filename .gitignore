@@ -3,6 +3,7 @@
 /_output/
 /_artifacts/
 /tmp
+/dist/
 
 # used for the code generators only
 /vendor/
