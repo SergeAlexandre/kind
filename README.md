@@ -4,7 +4,7 @@ Aim of this patch is to allow building a Kind cluster with a fixed IP address fo
 
 The main motivation is to be resilient against Docker restart and reboot of the workstation. 
 
-The original `kind` README is [here](./README.md)
+The original `kind` README is [here](./README_KIND.md)
 
 ## What was the problem
 
@@ -29,7 +29,7 @@ So this solution to allow container's IP addresses to be explicitly defined.
 Of course, first step is to include the patched Kind version in your path. This is transparent, as it behave like 
 the standard one by default.
 
-Just download the version for your architecture on the [Releases section of this repo](https://github.com/SergeAlexandre/kind/releases). 
+Just download the version for your architecture on the [Releases section of this repo](https://github.com/kubotal/kind/releases). 
 And add it in your PATH before the original `kind` command. (Or replace it)
 
 To ensure which one is used, the postfix `-fipXX` has been added to the base version:
